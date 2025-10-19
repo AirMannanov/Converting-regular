@@ -174,7 +174,40 @@
 
 
 (defun automaton-to-regex-string (edges start finals)
-  (automaton-to-regex edges start finals))
+  (expression->string (automaton-to-regex edges start finals)))
+
+;;;; -------------------------------------------
+;;;; Перевод выражения в строку для вывода в CLI
+;;;; -------------------------------------------
+
+(defun expression-precedence (e)
+  (cond
+    ((or (empty-p e) (epsilon-p e) (literal-p e)) 4)
+    ((star-p e) 3)
+    ((concat-p e) 2)
+    ((union-p e) 1)
+    (t 0)))
+
+(defun expression->string (expr &optional (outer-prec 0))
+  (let* ((my (expression-precedence expr))
+         (s
+           (cond
+             ((empty-p expr) "empty")
+             ((epsilon-p expr) "eps")
+             ((literal-p expr) (cadr expr))
+             ((star-p expr)
+              (concatenate 'string (expression->string (cadr expr) 3) "*"))
+             ((concat-p expr)
+              (apply #'concatenate 'string
+                     (mapcar (lambda (p) (expression->string p 2)) (cdr expr))))
+             ((union-p expr)
+              (format nil "~{~a~^|~}"
+                      (mapcar (lambda (p) (expression->string p 1)) (cdr expr))))
+             (t (error "Unknown regex node: ~a" expr)))))
+    (if (and (< my outer-prec)
+             (not (empty-p expr)) (not (epsilon-p expr)) (not (literal-p expr)))
+        (format nil "(~a)" s)
+        s)))
 
 ;;;; --------------------------
 ;;;; Main запуск всей программы
@@ -184,7 +217,7 @@
   (multiple-value-bind (edges start finals)
       (read-and-parse)
     (let ((re (automaton-to-regex-string edges start finals)))
-      (format t "~a~%" re)
+      (format T "~a~%" re)
       (finish-output))))
 
 ;; авто-вызов при sbcl --script

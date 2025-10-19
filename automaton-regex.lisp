@@ -4,16 +4,9 @@
 ;;;; Чтение входных данных и их валидация
 ;;;; ------------------------------------
 
-(defun ensure-list (x)
-  (if (listp x) x (list x)))
-
 (defun edge-form-p (edge)
   "Ребро — это список из трёх элементов: (from label to)"
   (and (listp edge) (= (length edge) 3)))
-
-(defun plistp-with-keywords (x)
-  "Проверка, что x — plist, начинающийся с keyword"
-  (and (listp x) (keywordp (first x))))
 
 (defun valid-label-p (label)
   "Метка – символ"
@@ -80,25 +73,47 @@
 
 (defun make-union (&rest xs)
   (let ((items '()))
+    ; Заполняем список элементов объединения
     (dolist (e xs)
       (cond
         ((empty-p e) nil)
+        ; Аккумулируем знак объединения
+        ((union-p e) (setf items (append items (copy-list (cdr e)))))
         (T (push e items))))
-    (cons :union items)))
+    ; Убираем дупликаты
+    (setf items
+      (remove-duplicates items))
+    ; Рассматриваем тривиальные случаи и выдаём итоговое объединение
+    (cond
+      ((null items) +empty+)
+      ((null (cdr items)) (car items))
+      (T (cons :union items)))))
 
 (defun make-concat (&rest xs)
   (let ((items '()))
+    ; Заполняем список элементов конкатенации
     (dolist (e xs)
       (cond
-        ((empty-p e) e)
+        ; Досрочно выходим из функции если есть пустой символ
+        ((empty-p e) (return-from make-concat +empty+))
         ((epsilon-p e) nil)
+        ; Аккумулируем знак конкатенации
+        ((concat-p e) (setf items (append items (copy-list (cdr e)))))
         (T (push e items))))
-    (cons :concat items)))
+    ; Необходимо, так как новые элементы мыкладём в начало xs из-за чего нарушается порядок
+    (setf items (nreverse items))
+    ; Рассматриваем тривиальные случаи и выдаём итоговую конкатенацию
+    (cond
+      ((null items) +epsilon+)
+      ((null (cdr items)) (car items))
+      (T (cons :concat items)))))
 
 (defun make-star (e)
   (cond
+    ; Рассматриваем тривиальные случаи 
     ((empty-p e) +epsilon+)
     ((epsilon-p e) +epsilon+)
+    ((star-p e) e)
     (T (list :star e))))
 
 ;;;; -------------------------

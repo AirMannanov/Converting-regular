@@ -81,13 +81,13 @@
         ((union-p e) (setf items (append items (copy-list (cdr e)))))
         (T (push e items))))
     ; Убираем дупликаты
-    (setf items
-      (remove-duplicates items))
+    (setf items (remove-duplicates items :test #'equal))
     ; Рассматриваем тривиальные случаи и выдаём итоговое объединение
     (cond
       ((null items) +empty+)
       ((null (cdr items)) (car items))
       (T (cons :union items)))))
+
 
 (defun make-concat (&rest xs)
   (let ((items '()))
@@ -99,9 +99,7 @@
         ((epsilon-p e) nil)
         ; Аккумулируем знак конкатенации
         ((concat-p e) (setf items (append items (copy-list (cdr e)))))
-        (T (push e items))))
-    ; Необходимо, так как новые элементы мыкладём в начало xs из-за чего нарушается порядок
-    (setf items (nreverse items))
+        (T (setf items (append items (list e))))))
     ; Рассматриваем тривиальные случаи и выдаём итоговую конкатенацию
     (cond
       ((null items) +epsilon+)
@@ -114,7 +112,19 @@
     ((empty-p e) +epsilon+)
     ((epsilon-p e) +epsilon+)
     ((star-p e) e)
+    ; Случай (a | eps)* переводит в a*
+    ((and (union-p e) (find-if #'epsilon-p (cdr e)))
+     (let* ((filtered (remove-if #'epsilon-p (cdr e)))
+            (reduced (cond
+                       ((null filtered) +epsilon+)
+                       ((null (cdr filtered)) (car filtered))
+                       (T (apply #'make-union filtered)))))
+       (make-star reduced)))
     (T (list :star e))))
+
+
+
+
 
 ;;;; -------------------------
 ;;;; Инструменты для алгоритма
@@ -239,5 +249,5 @@
 (when (member :sbcl *features*)
   (main))
 
-;;; Примеры запуска:
-;;;   echo '((H a S) (S b S))' | sbcl --script automaton-regex.lisp
+
+

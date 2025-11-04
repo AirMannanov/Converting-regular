@@ -41,7 +41,7 @@
   (cond
 
     ((and (listp data) (every #'edge-form-p data))
-     (dolist (e data) (validate-edge e))
+     (mapc #'validate-edge data)
      (values data 'H 'S))
 
     (T
@@ -72,39 +72,51 @@
 (defun make-literal (s) (list :literal s))
 
 (defun make-union (&rest xs)
-  (let ((items '()))
-    ; Заполняем список элементов объединения
-    (dolist (e xs)
+  ; Заполняем список элементов объединения без мутаций
+  (labels ((flatten (expr)
+             (cond
+               ((empty-p expr) '())
+               ((union-p expr) (flatten-list (cdr expr)))
+               (T (list expr))))
+           (flatten-list (lst)
+             (if (null lst)
+                 '()
+                 (append (flatten (car lst))
+                         (flatten-list (cdr lst))))))
+    ; Убираем дупликаты и приводим к нормальной форме
+    (let* ((items (remove-duplicates (flatten-list xs) :test #'equal)))
       (cond
-        ((empty-p e) nil)
-        ; Аккумулируем знак объединения
-        ((union-p e) (setf items (append items (copy-list (cdr e)))))
-        (T (push e items))))
-    ; Убираем дупликаты
-    (setf items (remove-duplicates items :test #'equal))
-    ; Рассматриваем тривиальные случаи и выдаём итоговое объединение
-    (cond
-      ((null items) +empty+)
-      ((null (cdr items)) (car items))
-      (T (cons :union items)))))
-
+        ; Рассматриваем тривиальные случаи и возвращаем объединение
+        ((null items) +empty+)
+        ((null (cdr items)) (car items))
+        (T (cons :union items))))))
 
 (defun make-concat (&rest xs)
-  (let ((items '()))
-    ; Заполняем список элементов конкатенации
-    (dolist (e xs)
-      (cond
-        ; Досрочно выходим из функции если есть пустой символ
-        ((empty-p e) (return-from make-concat +empty+))
-        ((epsilon-p e) nil)
-        ; Аккумулируем знак конкатенации
-        ((concat-p e) (setf items (append items (copy-list (cdr e)))))
-        (T (setf items (append items (list e))))))
-    ; Рассматриваем тривиальные случаи и выдаём итоговую конкатенацию
-    (cond
-      ((null items) +epsilon+)
-      ((null (cdr items)) (car items))
-      (T (cons :concat items)))))
+  (let ((empty-marker (list :empty-marker)))
+    ; Заполняем список элементов конкатенации, отслеживая пустоту
+    (labels ((flatten (expr)
+               (cond
+                 ((empty-p expr) empty-marker)
+                 ((epsilon-p expr) '())
+                 ((concat-p expr) (flatten-list (cdr expr)))
+                 (T (list expr))))
+             (flatten-list (lst)
+               (if (null lst)
+                   '()
+                   (let ((items (flatten (car lst))))
+                     (if (eq items empty-marker)
+                         empty-marker
+                         (let ((rest (flatten-list (cdr lst))))
+                           (if (eq rest empty-marker)
+                              empty-marker
+                              (append items rest))))))))
+      (let ((items (flatten-list xs)))
+        (cond
+          ; Рассматриваем тривиальные случаи и возвращаем конкатенацию
+          ((eq items empty-marker) +empty+)
+          ((null items) +epsilon+)
+          ((null (cdr items)) (car items))
+          (T (cons :concat items)))))))
 
 (defun make-star (e)
   (cond
@@ -121,10 +133,6 @@
                        (T (apply #'make-union filtered)))))
        (make-star reduced)))
     (T (list :star e))))
-
-
-
-
 
 ;;;; -------------------------
 ;;;; Инструменты для алгоритма
@@ -145,13 +153,70 @@
    (append (mapcar #'first edges)
            (mapcar #'third edges))))
 
-(defun copy-matrix (m)
-  "Копируем матрицу для следующей итерации алгоритма"
-  (let* ((dims (array-dimensions m))
-         (copied  (make-array dims)))
-    (dotimes (k (array-total-size m) copied)
-      (setf (row-major-aref copied k)
-            (row-major-aref m  k)))))
+(defun iota (n &optional (start 0))
+  "Список натуральных чисел [start, start+n)"
+  (labels ((build (k)
+             (if (= k n)
+                 '()
+                 (cons (+ start k) (build (+ 1 k))))))
+    (build 0)))
+
+(defun matrix-ref (matrix i j)
+  (nth j (nth i matrix)))
+
+(defun direct-expression (edges from to)
+  (let* ((matching (remove-if-not
+                    (lambda (edge)
+                      (and (equal (first edge) from)
+                           (equal (third edge) to)))
+                    edges))
+         (labels (mapcar (lambda (edge)
+                           (normalize-label (second edge)))
+                         matching)))
+    (if labels
+        (apply #'make-union labels)
+        +empty+)))
+
+(defun base-matrix (states edges)
+  (let ((indices (iota (length states))))
+    ; Формируем базовую матрицу переходов (R ^ 0)
+    (mapcar
+     (lambda (i)
+       (mapcar
+        (lambda (j)
+          (let* ((from (nth i states))
+                 (to   (nth j states))
+                 (direct (direct-expression edges from to)))
+            (if (= i j)
+                (make-union direct +epsilon+)
+                direct)))
+        indices))
+     indices)))
+
+(defun step-matrix (matrix k)
+  (let* ((indices (iota (length matrix)))
+         (rkk (matrix-ref matrix k k)))
+    ; Вычисляем очередное приближение по формуле R := R | R (R_kk)* R
+    (mapcar
+     (lambda (i)
+       (mapcar
+        (lambda (j)
+          (make-union
+           (matrix-ref matrix i j)
+           (make-concat
+            (matrix-ref matrix i k)
+            (make-star rkk)
+            (matrix-ref matrix k j))))
+        indices))
+     indices)))
+
+(defun iterate-matrix (matrix limit)
+  (labels ((advance (k current)
+             ; Итеративно улучшаем матрицу по всем промежуточным вершинам
+             (if (= k limit)
+                 current
+                 (advance (1+ k) (step-matrix current k)))))
+    (advance 0 matrix)))
 
 ;;;; --------------------------
 ;;;; Алгоритм перевода ДКА в РВ
@@ -159,44 +224,18 @@
 
 (defun automaton-to-regex (edges start final)
   "Метод транзитивного закрытия"
-  (let* ((states (all-states edges))
-         (n      (length states))
-         (R      (make-array (list n n) :initial-element +empty+)))
-
-      ; Оперделим локальную функцию поиска индекса состояния
-      (flet ((i-of (s)
-        (position s states)))
-
-      ; Добавить исходные ребра в матрицу. 
-      ; По факту инициализация матрицы начальными значениям (R ^ 0)
-      (dolist (e edges)
-        (destructuring-bind (from lab to) e
-          (let* ((i (i-of from))
-                 (j (i-of to))
-                 (x (normalize-label lab)))
-            (setf (aref R i j) (make-union (aref R i j) x)))))
-
-      ; Добавляем eps на диагональные элементы матрицы.
-      ; По факту разбираемся с путями нулевой длины (т.е. из состояния q_i в q_i переход eps)
-      (dotimes (i n)
-        (setf (aref R i i) (make-union (aref R i i) +epsilon+)))
-
-      ; Итерационно заполняем матрицу
-      ; На k-ой итераии R := R | R (R_kk)* R
-      (dotimes (k n)
-        (let ((prev (copy-matrix R)))
-          (dotimes (i n)
-            (dotimes (j n)
-              (setf (aref R i j)
-                    (make-union
-                     (aref prev i j)
-                     (make-concat (aref prev i k)
-                                  (make-star (aref prev k k))
-                                  (aref prev k j))))))))
-
-      ; Ответ
-      (aref R (i-of start) (i-of final)))))
-
+  (let* ((states (remove-duplicates
+                  (append (all-states edges) (list start final))
+                  :test #'equal))
+         (n (length states))
+         (base (base-matrix states edges))
+         (final-matrix (iterate-matrix base n))
+         (i (position start states :test #'equal))
+         (j (position final states :test #'equal)))
+    (unless (and i j)
+      (error "Не удаётся найти старт (~a) или финальное (~a) состояние среди состояний автомата"
+             start final))
+    (matrix-ref final-matrix i j)))
 
 (defun automaton-to-regex-string (edges start finals)
   (expression->string (automaton-to-regex edges start finals)))
@@ -248,6 +287,3 @@
 ;; авто-вызов при sbcl --script
 (when (member :sbcl *features*)
   (main))
-
-
-
